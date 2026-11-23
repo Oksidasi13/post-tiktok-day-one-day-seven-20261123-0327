@@ -1,0 +1,613 @@
+<!-- Star Catcher — Day Seven build.
+     Same tiny game, one week of daily updates later: same map, same start,
+     same basket, same falling stars — plus combos, power-ups, waves,
+     particles and a richer night sky. Open with ?auto=1&seed=7 to watch
+     the agent play it itself. -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Star Catcher — Day Seven</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #070b1e; }
+  body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+  #game { display: block; width: 100vw; height: 100vh; touch-action: none; cursor: pointer; }
+  .overlay {
+    position: fixed; inset: 0; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; text-align: center;
+    color: #fff; background: rgba(7, 11, 30, 0.72); z-index: 10;
+    padding: 24px;
+  }
+  .overlay h1 { font-size: 64px; letter-spacing: 2px; margin-bottom: 8px; }
+  .overlay h1 .star { color: #ffd94d; }
+  .overlay p { font-size: 26px; line-height: 1.5; opacity: 0.9; max-width: 560px; }
+  .overlay .tag {
+    margin-top: 10px; font-size: 22px; font-weight: 700; letter-spacing: 3px;
+    color: #8ef0ff; text-transform: uppercase;
+  }
+  .overlay .big { font-size: 34px; font-weight: 700; margin-top: 12px; }
+  .overlay button {
+    margin-top: 28px; font-size: 30px; font-weight: 700; color: #191419;
+    background: #ffd94d; border: 0; border-radius: 999px;
+    padding: 16px 44px; cursor: pointer;
+  }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+
+<div class="overlay" id="startScreen">
+  <h1><span class="star">★</span> STAR CATCHER <span class="star">★</span></h1>
+  <p class="tag">Day 7 · a week of daily updates</p>
+  <p>Catch the falling stars in your basket.<br>Move with your mouse or the ← → keys.<br>60 seconds. 3 lives. Combos, power-ups, waves — how many can you catch?</p>
+  <button id="startBtn">▶&nbsp; PLAY</button>
+</div>
+
+<div class="overlay hidden" id="endScreen">
+  <h1>TIME'S UP!</h1>
+  <p class="big" id="finalScore">You caught 0 stars</p>
+  <p id="finalCombo"></p>
+  <p id="finalLine">Nice catching!</p>
+  <button id="againBtn">↻&nbsp; PLAY AGAIN</button>
+</div>
+
+<script>
+"use strict";
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+const startScreen = document.getElementById("startScreen");
+const endScreen = document.getElementById("endScreen");
+const finalScore = document.getElementById("finalScore");
+const finalCombo = document.getElementById("finalCombo");
+const finalLine = document.getElementById("finalLine");
+
+const AUTO = new URLSearchParams(location.search).has("auto");
+const params = new URLSearchParams(location.search);
+const SEED = parseInt(params.get("seed") || "7", 10);
+
+let W = 0, H = 0, DPR = 1;
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = Math.floor(W * DPR);
+  canvas.height = Math.floor(H * DPR);
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+}
+window.addEventListener("resize", resize);
+resize();
+
+// Seeded random so every run of the game plays the same way.
+// rnd() is the ORIGINAL day-one stream: the core star spawns, catches and
+// bursts draw from it in exactly the same order as day one, so the same
+// seed replays the same moment. rnd2() is a second stream, seeded
+// separately, for everything the week of updates added — it can never
+// desync the original game.
+let seed = SEED >>> 0;
+function rnd() {
+  seed = (seed * 1664525 + 1013904223) >>> 0;
+  return seed / 4294967296;
+}
+let seed2 = 99 >>> 0;
+function rnd2() {
+  seed2 = (seed2 * 1664525 + 1013904223) >>> 0;
+  return seed2 / 4294967296;
+}
+
+const GAME_SECONDS = 60;
+const state = {
+  running: false, over: false,
+  score: 0, caught: 0, missed: 0, lives: 3,
+  timeLeft: GAME_SECONDS, elapsed: 0,
+  basketX: 0, basketW: 0, basketY: 0,
+  stars: [], parts: [], bgStars: [],
+  spawnIn: 0, flash: 0,
+  // --- a week of updates ---
+  combo: 0, bestCombo: 0,
+  multUntil: 0, slowUntil: 0,
+  wave: 1, waveBanner: 0,
+  popups: [], shootStars: [], city: [],
+};
+
+function basketWidth() { return Math.max(120, W * 0.16); }
+function reset() {
+  state.score = 0; state.caught = 0; state.missed = 0; state.lives = 3;
+  state.timeLeft = GAME_SECONDS; state.elapsed = 0;
+  state.stars = []; state.parts = []; state.flash = 0;
+  state.basketW = basketWidth();
+  state.basketX = W / 2 - state.basketW / 2;
+  state.basketY = H - 110;
+  state.spawnIn = 0.2;
+  seed = SEED >>> 0;
+  state.bgStars = [];
+  for (let i = 0; i < 90; i++) {
+    state.bgStars.push({
+      x: rnd() * W, y: rnd() * H * 0.75,
+      r: 0.6 + rnd() * 1.8, tw: rnd() * Math.PI * 2, sp: 0.5 + rnd() * 1.5,
+    });
+  }
+  // --- new scenery, drawn from the second stream only ---
+  seed2 = 99 >>> 0;
+  state.combo = 0; state.bestCombo = 0;
+  state.multUntil = 0; state.slowUntil = 0;
+  state.wave = 1; state.waveBanner = 0;
+  state.popups = []; state.shootStars = [];
+  state.city = [];
+  let cx = -20;
+  while (cx < W + 40) {
+    const bw = 46 + rnd2() * 70, bh = 60 + rnd2() * 130;
+    const wins = [];
+    const cols = Math.floor(bw / 16), rows = Math.floor(bh / 22);
+    for (let c = 0; c < cols; c++) for (let r = 0; r < rows; r++) {
+      if (rnd2() < 0.42) wins.push({ dx: 6 + c * 16, dy: 8 + r * 22, warm: rnd2() < 0.7 });
+    }
+    state.city.push({ x: cx, w: bw, h: bh, wins });
+    cx += bw + 8 + rnd2() * 26;
+  }
+}
+
+function spawnStar() {
+  // Identical draws, in the identical order, to day one.
+  const kind = rnd();
+  const star = {
+    x: 40 + rnd() * (W - 80),
+    y: -30,
+    vy: 260 + rnd() * 220 + state.elapsed * 2.2,
+    r: kind < 0.12 ? 26 : 18 + rnd() * 8,
+    rot: rnd() * Math.PI,
+    vr: (rnd() - 0.5) * 2.4,
+    hue: kind < 0.12 ? "pink" : "gold",
+    wob: rnd() * Math.PI * 2,
+  };
+  // Bonus star types only after 12s, decided on the second stream, so the
+  // opening moments stay byte-for-byte the day-one game.
+  if (state.elapsed > 12) {
+    const roll = rnd2();
+    if (roll < 0.04) { star.hue = "blue"; star.r = 24; }
+    else if (roll < 0.08) { star.hue = "cyan"; star.r = 22; }
+    else if (roll < 0.10) { star.hue = "rainbow"; star.r = 26; }
+  }
+  state.stars.push(star);
+}
+
+function burst(x, y, color) {
+  // Original day-one burst, untouched (same rnd() draws).
+  for (let i = 0; i < 16; i++) {
+    const a = rnd() * Math.PI * 2, sp = 60 + rnd() * 220;
+    state.parts.push({
+      x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp - 60,
+      life: 0.5 + rnd() * 0.4, max: 0.9, color,
+    });
+  }
+}
+
+function burstExtra(x, y, color, n) {
+  // The week's bigger celebrations, on the second stream only.
+  for (let i = 0; i < n; i++) {
+    const a = rnd2() * Math.PI * 2, sp = 120 + rnd2() * 320;
+    state.parts.push({
+      x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp - 90,
+      life: 0.7 + rnd2() * 0.5, max: 1.2, color,
+    });
+  }
+}
+
+function popup(x, y, text, color) {
+  state.popups.push({
+    x, y, text, color,
+    drift: (rnd2() - 0.5) * 36,
+    life: 1.1, max: 1.1,
+  });
+}
+
+function starColor(hue, t) {
+  if (hue === "pink") return "#ff9ecf";
+  if (hue === "blue") return "#7ec8ff";
+  if (hue === "cyan") return "#5df2d6";
+  if (hue === "rainbow") {
+    const h = Math.floor((t * 140) % 360);
+    return "hsl(" + h + ", 95%, 68%)";
+  }
+  return "#ffd94d";
+}
+
+function drawStar(x, y, r, rot, color) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(rot);
+  ctx.shadowColor = color;
+  ctx.shadowBlur = 22;
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  for (let i = 0; i < 10; i++) {
+    const ang = (i * Math.PI) / 5 - Math.PI / 2;
+    const rad = i % 2 === 0 ? r : r * 0.45;
+    const px = Math.cos(ang) * rad, py = Math.sin(ang) * rad;
+    if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+  }
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawBasket() {
+  const x = state.basketX, y = state.basketY, w = state.basketW, h = 64;
+  ctx.save();
+  ctx.shadowColor = "#ffb03a";
+  ctx.shadowBlur = 18;
+  const grad = ctx.createLinearGradient(x, y, x, y + h);
+  grad.addColorStop(0, "#ffb03a");
+  grad.addColorStop(1, "#e07b1f");
+  ctx.fillStyle = grad;
+  ctx.beginPath();
+  ctx.moveTo(x, y);
+  ctx.lineTo(x + w, y);
+  ctx.lineTo(x + w - 14, y + h);
+  ctx.lineTo(x + 14, y + h);
+  ctx.closePath();
+  ctx.fill();
+  ctx.shadowBlur = 0;
+  ctx.strokeStyle = "rgba(255,255,255,0.55)";
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(x + 10, y + 22); ctx.lineTo(x + w - 10, y + 22);
+  ctx.moveTo(x + 16, y + 42); ctx.lineTo(x + w - 16, y + 42);
+  ctx.stroke();
+  // Combo flames lick off the basket while a combo is hot.
+  if (state.combo >= 3) {
+    ctx.fillStyle = "rgba(255,190,80,0.85)";
+    ctx.beginPath();
+    ctx.ellipse(x + w / 2, y - 6, 26 + state.combo * 2, 10, 0, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+function drawHUD() {
+  ctx.save();
+  ctx.textBaseline = "top";
+  // Score, top left.
+  ctx.fillStyle = "#ffd94d";
+  ctx.font = "800 44px system-ui, sans-serif";
+  ctx.fillText("★ " + state.score, 28, 24);
+  // Combo meter under the score.
+  if (state.combo >= 2) {
+    ctx.fillStyle = "#ff9ecf";
+    ctx.font = "800 30px system-ui, sans-serif";
+    ctx.fillText("COMBO ×" + state.combo, 30, 78);
+    ctx.fillStyle = "rgba(255,255,255,0.25)";
+    ctx.fillRect(30, 112, 150, 8);
+    ctx.fillStyle = "#ff9ecf";
+    ctx.fillRect(30, 112, Math.min(150, state.combo * 18), 8);
+  }
+  // Timer, top centre.
+  const t = Math.max(0, Math.ceil(state.timeLeft));
+  ctx.fillStyle = t <= 10 ? "#ff6b6b" : "#ffffff";
+  ctx.font = "800 44px system-ui, sans-serif";
+  ctx.textAlign = "center";
+  ctx.fillText("⏱ " + t + "s", W / 2, 24);
+  // Wave label, bottom-left over the dark hills: every top spot collides
+  // with the score, the timer, the moon or the make.fun badge.
+  ctx.textAlign = "left";
+  ctx.fillStyle = "#8ef0ff";
+  ctx.font = "700 22px system-ui, sans-serif";
+  ctx.fillText("WAVE " + state.wave, 30, H - 36);
+  // Lives, top right.
+  ctx.textAlign = "right";
+  let hearts = "";
+  for (let i = 0; i < 3; i++) hearts += i < state.lives ? "♥ " : "♡ ";
+  ctx.fillStyle = "#ff6b81";
+  ctx.font = "800 44px system-ui, sans-serif";
+  ctx.fillText(hearts.trim(), W - 28, 24);
+  // Caught counter, under the score — dropped below the make.fun badge
+  // zone while a combo is showing, so the video's badge never covers it.
+  ctx.textAlign = "left";
+  ctx.fillStyle = "rgba(255,255,255,0.85)";
+  ctx.font = "600 26px system-ui, sans-serif";
+  ctx.fillText(state.caught + " caught · " + state.missed + " missed", 30, 214);
+  // Power-up timer bar, bottom centre.
+  if (state.multUntil > state.elapsed || state.slowUntil > state.elapsed) {
+    const label = state.multUntil > state.elapsed ? "2× POINTS" : "SLOW-MO";
+    const remain = Math.max(state.multUntil, state.slowUntil) - state.elapsed;
+    const total = state.multUntil > state.elapsed ? 5 : 4;
+    ctx.textAlign = "center";
+    ctx.fillStyle = "#5df2d6";
+    ctx.font = "800 26px system-ui, sans-serif";
+    ctx.fillText(label, W / 2, H - 64);
+    ctx.fillStyle = "rgba(255,255,255,0.25)";
+    ctx.fillRect(W / 2 - 110, H - 34, 220, 8);
+    ctx.fillStyle = "#5df2d6";
+    ctx.fillRect(W / 2 - 110, H - 34, 220 * Math.max(0, remain / total), 8);
+  }
+  ctx.restore();
+}
+
+function drawBackground(t) {
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, "#0a1030");
+  g.addColorStop(0.55, "#141a45");
+  g.addColorStop(1, "#2b1d52");
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, W, H);
+  // Aurora bands drifting across the sky.
+  ctx.save();
+  ctx.globalAlpha = 0.20;
+  const ag = ctx.createLinearGradient(0, 0, W, H * 0.4);
+  ag.addColorStop(0, "#37e6a0");
+  ag.addColorStop(0.5, "#37b6e6");
+  ag.addColorStop(1, "#b678f0");
+  ctx.fillStyle = ag;
+  ctx.beginPath();
+  const ay = H * 0.16 + Math.sin(t * 0.25) * 24;
+  ctx.moveTo(0, ay + 60);
+  ctx.quadraticCurveTo(W * 0.3, ay - 50, W * 0.6, ay + 30);
+  ctx.quadraticCurveTo(W * 0.85, ay + 90, W, ay + 10);
+  ctx.lineTo(W, ay - 70);
+  ctx.quadraticCurveTo(W * 0.6, ay - 110, W * 0.3, ay - 60);
+  ctx.lineTo(0, ay - 30);
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+  // Moon.
+  ctx.save();
+  ctx.shadowColor = "#fff8d6";
+  ctx.shadowBlur = 60;
+  ctx.fillStyle = "#fff8d6";
+  ctx.beginPath();
+  ctx.arc(W - 130, 130, 54, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+  // Twinkling background stars.
+  for (const s of state.bgStars) {
+    const a = 0.35 + 0.65 * Math.abs(Math.sin(t * s.sp + s.tw));
+    ctx.globalAlpha = a;
+    ctx.fillStyle = "#ffffff";
+    ctx.beginPath();
+    ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+  // Shooting stars.
+  for (const s of state.shootStars) {
+    const p = 1 - s.life / s.max;
+    ctx.strokeStyle = "rgba(255,255,255," + (0.9 * (1 - p)).toFixed(3) + ")";
+    ctx.lineWidth = 2.5;
+    ctx.beginPath();
+    ctx.moveTo(s.x, s.y);
+    ctx.lineTo(s.x - s.vx * 0.12, s.y - s.vy * 0.12);
+    ctx.stroke();
+  }
+  // City skyline with lit windows along the horizon.
+  for (const b of state.city) {
+    ctx.fillStyle = "#0d1233";
+    ctx.fillRect(b.x, H - 150 - b.h, b.w, b.h + 150);
+    for (const win of b.wins) {
+      ctx.fillStyle = win.warm ? "rgba(255,214,120,0.85)" : "rgba(140,220,255,0.8)";
+      ctx.fillRect(b.x + win.dx, H - 150 - b.h + win.dy, 8, 10);
+    }
+  }
+  // Distant hills.
+  ctx.fillStyle = "#0b0f2a";
+  ctx.beginPath();
+  ctx.moveTo(0, H);
+  ctx.lineTo(0, H - 130);
+  ctx.quadraticCurveTo(W * 0.3, H - 220, W * 0.55, H - 140);
+  ctx.quadraticCurveTo(W * 0.8, H - 80, W, H - 150);
+  ctx.lineTo(W, H);
+  ctx.closePath();
+  ctx.fill();
+}
+
+let lastTs = 0;
+function frame(ts) {
+  requestAnimationFrame(frame);
+  const dt = Math.min(0.05, (ts - lastTs) / 1000 || 0.016);
+  lastTs = ts;
+  const t = ts / 1000;
+  drawBackground(t);
+  if (state.running && !state.over) {
+    state.elapsed += dt;
+    state.timeLeft = GAME_SECONDS - state.elapsed;
+    if (state.timeLeft <= 0) {
+      state.timeLeft = 0;
+      endGame();
+    }
+    // Wave 2 after 15s: faster spawns, banner, a little more chaos.
+    if (state.wave === 1 && state.elapsed >= 15) {
+      state.wave = 2;
+      state.waveBanner = 2.0;
+    }
+    if (state.waveBanner > 0) state.waveBanner -= dt;
+    // A shooting star crosses the sky every few seconds.
+    if (rnd2() < dt * 0.35 && state.shootStars.length < 3) {
+      state.shootStars.push({
+        x: rnd2() * W * 0.7, y: 40 + rnd2() * H * 0.25,
+        vx: 420 + rnd2() * 260, vy: 180 + rnd2() * 120,
+        life: 0.9, max: 0.9,
+      });
+    }
+    // Auto-play: steer the basket under the lowest falling star.
+    if (AUTO) {
+      let target = null;
+      for (const s of state.stars) {
+        if (!target || s.y > target.y) target = s;
+      }
+      if (target) {
+        const want = target.x - state.basketW / 2;
+        const dx = want - state.basketX;
+        const step = 1400 * dt;
+        state.basketX += Math.max(-step, Math.min(step, dx));
+      }
+    }
+    state.spawnIn -= dt;
+    if (state.spawnIn <= 0) {
+      spawnStar();
+      let interval = Math.max(0.28, 0.62 - state.elapsed * 0.006);
+      if (state.wave >= 2) interval *= 0.7;
+      state.spawnIn = interval;
+    }
+    const slowed = state.elapsed < state.slowUntil;
+    for (let i = state.stars.length - 1; i >= 0; i--) {
+      const s = state.stars[i];
+      s.y += s.vy * (slowed ? 0.5 : 1) * dt;
+      s.x += Math.sin(t * 2 + s.wob) * 30 * dt;
+      s.rot += s.vr * dt;
+      const bx = state.basketX, bw = state.basketW, by = state.basketY;
+      if (s.y + s.r >= by && s.y < by + 50 && s.x > bx - 6 && s.x < bx + bw + 6) {
+        // Caught! Combo grows, points multiply.
+        let pts = s.hue === "pink" ? 25 : s.hue === "rainbow" ? 50 : 10;
+        state.combo++;
+        state.bestCombo = Math.max(state.bestCombo, state.combo);
+        pts *= Math.min(5, state.combo);
+        if (state.elapsed < state.multUntil) pts *= 2;
+        state.score += pts;
+        state.caught++;
+        popup(s.x, by - 26, "+" + pts + (state.combo >= 2 ? " ×" + Math.min(5, state.combo) : ""), starColor(s.hue, t));
+        burst(s.x, by - 6, starColor(s.hue, t));
+        burstExtra(s.x, by - 6, starColor(s.hue, t), 14);
+        if (s.hue === "blue") {
+          state.slowUntil = state.elapsed + 4;
+          popup(s.x, by - 60, "SLOW-MO!", "#7ec8ff");
+        }
+        if (s.hue === "cyan") {
+          state.multUntil = state.elapsed + 5;
+          popup(s.x, by - 60, "2× POINTS!", "#5df2d6");
+        }
+        if (s.hue === "rainbow") burstExtra(s.x, by - 6, "#ffffff", 20);
+        state.stars.splice(i, 1);
+        continue;
+      }
+      if (s.y - s.r > H) {
+        state.stars.splice(i, 1);
+        state.missed++;
+        state.lives--;
+        state.combo = 0;
+        state.flash = 0.35;
+        burst(s.x, H - 30, "#ff6b6b");
+        burstExtra(s.x, H - 30, "#ff6b6b", 10);
+        popup(s.x, H - 90, "MISS", "#ff6b6b");
+        if (state.lives <= 0) endGame();
+      }
+    }
+    for (let i = state.parts.length - 1; i >= 0; i--) {
+      const p = state.parts[i];
+      p.life -= dt;
+      if (p.life <= 0) { state.parts.splice(i, 1); continue; }
+      p.x += p.vx * dt; p.y += p.vy * dt; p.vy += 320 * dt;
+    }
+    for (let i = state.popups.length - 1; i >= 0; i--) {
+      const p = state.popups[i];
+      p.life -= dt;
+      p.y -= 46 * dt;
+      p.x += p.drift * dt;
+      if (p.life <= 0) state.popups.splice(i, 1);
+    }
+    for (let i = state.shootStars.length - 1; i >= 0; i--) {
+      const s = state.shootStars[i];
+      s.life -= dt;
+      s.x += s.vx * dt; s.y += s.vy * dt;
+      if (s.life <= 0) state.shootStars.splice(i, 1);
+    }
+    if (state.flash > 0) state.flash -= dt;
+  }
+  // Draw stars with motion trails, basket, particles, popups, HUD.
+  for (const s of state.stars) {
+    const col = starColor(s.hue, t);
+    ctx.save();
+    ctx.globalAlpha = 0.35;
+    ctx.strokeStyle = col;
+    ctx.lineWidth = s.r * 0.5;
+    ctx.beginPath();
+    ctx.moveTo(s.x, s.y - s.vy * 0.09);
+    ctx.lineTo(s.x, s.y);
+    ctx.stroke();
+    ctx.restore();
+    drawStar(s.x, s.y, s.r, s.rot, col);
+  }
+  drawBasket();
+  for (const p of state.parts) {
+    ctx.globalAlpha = Math.max(0, p.life / p.max);
+    ctx.fillStyle = p.color;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, 4, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+  for (const p of state.popups) {
+    ctx.globalAlpha = Math.max(0, p.life / p.max);
+    ctx.fillStyle = p.color;
+    ctx.font = "800 30px system-ui, sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText(p.text, p.x, p.y);
+  }
+  ctx.globalAlpha = 1;
+  ctx.textAlign = "left";
+  if (state.flash > 0) {
+    ctx.fillStyle = "rgba(255,60,60," + (state.flash * 0.5).toFixed(3) + ")";
+    ctx.fillRect(0, 0, W, H);
+  }
+  // Wave banner, low in the sky so it never collides with overlay titles.
+  if (state.waveBanner > 0) {
+    ctx.save();
+    ctx.globalAlpha = Math.min(1, state.waveBanner);
+    ctx.textAlign = "center";
+    ctx.fillStyle = "#8ef0ff";
+    ctx.font = "800 60px system-ui, sans-serif";
+    ctx.shadowColor = "#37b6e6";
+    ctx.shadowBlur = 26;
+    ctx.fillText("WAVE 2!", W / 2, H * 0.55);
+    ctx.font = "700 26px system-ui, sans-serif";
+    ctx.fillStyle = "#ffffff";
+    ctx.fillText("faster · more stars", W / 2, H * 0.55 + 44);
+    ctx.restore();
+  }
+  drawHUD();
+}
+
+function startGame() {
+  reset();
+  state.running = true;
+  state.over = false;
+  startScreen.classList.add("hidden");
+  endScreen.classList.add("hidden");
+}
+
+function endGame() {
+  if (state.over) return;
+  state.over = true;
+  state.running = false;
+  finalScore.textContent = "You caught " + state.caught + " stars · " + state.score + " points";
+  finalCombo.textContent = state.bestCombo >= 2 ? "Best combo ×" + state.bestCombo + " · Wave " + state.wave : "";
+  finalLine.textContent =
+    state.score >= 400 ? "Legendary catching! 🌟" :
+    state.score >= 200 ? "Great hands! Keep going!" :
+    "Nice catching — one more round?";
+  endScreen.classList.remove("hidden");
+}
+
+document.getElementById("startBtn").addEventListener("click", startGame);
+document.getElementById("againBtn").addEventListener("click", startGame);
+
+function moveBasket(clientX) {
+  state.basketX = Math.max(0, Math.min(W - state.basketW, clientX - state.basketW / 2));
+}
+window.addEventListener("pointermove", (e) => { if (state.running) moveBasket(e.clientX); });
+window.addEventListener("pointerdown", (e) => { if (state.running) moveBasket(e.clientX); });
+window.addEventListener("keydown", (e) => {
+  if (!state.running) return;
+  const step = 46;
+  if (e.key === "ArrowLeft") state.basketX = Math.max(0, state.basketX - step);
+  if (e.key === "ArrowRight") state.basketX = Math.min(W - state.basketW, state.basketX + step);
+});
+
+reset();
+if (AUTO) startGame();
+requestAnimationFrame(frame);
+
+// Tiny debug handle for the video driver.
+window.__game = state;
+</script>
+</body>
+</html>
